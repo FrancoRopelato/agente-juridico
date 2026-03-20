@@ -135,9 +135,66 @@ if archivo:
         st.markdown(resultado)
         
         # Botón para descargar el análisis
-        st.download_button(
-            label="⬇️ Descargar análisis",
-            data=resultado,
-            file_name=f"analisis_{archivo.name}.txt",
-            mime="text/plain"
-        )
+        # Generar archivo Word
+from docx import Document
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import re
+
+def generar_word(texto_analisis, nombre_documento):
+    doc = Document()
+    
+    # Título principal
+    titulo = doc.add_heading('ANÁLISIS JURÍDICO', 0)
+    titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Nombre del documento analizado
+    subtitulo = doc.add_paragraph(f'Documento: {nombre_documento}')
+    subtitulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Línea separadora
+    doc.add_paragraph('─' * 60)
+    
+    # Procesar el contenido línea por línea
+    lineas = texto_analisis.split('\n')
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea:
+            doc.add_paragraph('')
+            continue
+            
+        # Detectar títulos de secciones
+        if linea.startswith('###') or linea.startswith('##'):
+            titulo_seccion = linea.replace('###', '').replace('##', '').strip()
+            doc.add_heading(titulo_seccion, level=2)
+        elif linea.startswith('#'):
+            titulo_seccion = linea.replace('#', '').strip()
+            doc.add_heading(titulo_seccion, level=1)
+        elif linea.startswith('**') and linea.endswith('**'):
+            # Texto en negrita
+            p = doc.add_paragraph()
+            run = p.add_run(linea.replace('**', ''))
+            run.bold = True
+        elif linea.startswith('- ') or linea.startswith('* '):
+            # Lista con viñetas
+            doc.add_paragraph(linea[2:], style='List Bullet')
+        elif linea.startswith('✓') or linea.startswith('⚠') or linea.startswith('✗'):
+            # Citas jurídicas
+            p = doc.add_paragraph(linea, style='List Bullet')
+        else:
+            doc.add_paragraph(linea)
+    
+    # Guardar en memoria
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# Generar y ofrecer descarga en Word
+word_buffer = generar_word(resultado, archivo.name)
+st.download_button(
+    label="⬇️ Descargar análisis en Word",
+    data=word_buffer,
+    file_name=f"analisis_{archivo.name.replace('.pdf', '')}.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
