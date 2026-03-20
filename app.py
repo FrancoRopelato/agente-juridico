@@ -4,6 +4,9 @@ import PyPDF2
 import base64
 import io
 from PIL import Image
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import re
 
 # Configuración de la página
 st.set_page_config(
@@ -52,7 +55,6 @@ CITAS A VERIFICAR: [citas marcadas con ✗]
 """
 
 def analizar_pdf_digital(archivo_bytes):
-    """Extrae texto de PDF digital."""
     lector = PyPDF2.PdfReader(io.BytesIO(archivo_bytes))
     texto = ""
     for pagina in lector.pages:
@@ -60,7 +62,6 @@ def analizar_pdf_digital(archivo_bytes):
     return texto
 
 def analizar_pdf_escaneado(archivo_bytes):
-    """Procesa PDF escaneado como imágenes."""
     from pdf2image import convert_from_bytes
     paginas = convert_from_bytes(archivo_bytes, dpi=100)
     imagenes = []
@@ -73,9 +74,7 @@ def analizar_pdf_escaneado(archivo_bytes):
     return imagenes
 
 def obtener_analisis(contenido, es_imagen=False):
-    """Manda el contenido a Claude y obtiene el análisis."""
     client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-    
     if es_imagen:
         mensaje_contenido = []
         for img in contenido:
@@ -102,6 +101,40 @@ def obtener_analisis(contenido, es_imagen=False):
     )
     return message.content[0].text
 
+def generar_word(texto_analisis, nombre_documento):
+    doc = Document()
+    titulo = doc.add_heading('ANÁLISIS JURÍDICO', 0)
+    titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitulo = doc.add_paragraph(f'Documento: {nombre_documento}')
+    subtitulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph('─' * 60)
+    lineas = texto_analisis.split('\n')
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea:
+            doc.add_paragraph('')
+            continue
+        if linea.startswith('###') or linea.startswith('##'):
+            titulo_seccion = linea.replace('###', '').replace('##', '').strip()
+            doc.add_heading(titulo_seccion, level=2)
+        elif linea.startswith('#'):
+            titulo_seccion = linea.replace('#', '').strip()
+            doc.add_heading(titulo_seccion, level=1)
+        elif linea.startswith('**') and linea.endswith('**'):
+            p = doc.add_paragraph()
+            run = p.add_run(linea.replace('**', ''))
+            run.bold = True
+        elif linea.startswith('- ') or linea.startswith('* '):
+            doc.add_paragraph(linea[2:], style='List Bullet')
+        elif linea.startswith('✓') or linea.startswith('⚠') or linea.startswith('✗'):
+            doc.add_paragraph(linea, style='List Bullet')
+        else:
+            doc.add_paragraph(linea)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
 # Interfaz principal
 archivo = st.file_uploader(
     "Seleccioná el documento PDF",
@@ -114,10 +147,7 @@ if archivo:
     
     if st.button("🔍 Analizar documento", type="primary"):
         with st.spinner("Analizando documento... esto puede tomar unos segundos"):
-            
             archivo_bytes = archivo.read()
-            
-            # Intentar como PDF digital primero
             try:
                 texto = analizar_pdf_digital(archivo_bytes)
                 if len(texto.strip()) > 100:
@@ -134,67 +164,10 @@ if archivo:
         st.markdown("---")
         st.markdown(resultado)
         
-        # Botón para descargar el análisis
-        # Generar archivo Word
-from docx import Document
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-import re
-
-def generar_word(texto_analisis, nombre_documento):
-    doc = Document()
-    
-    # Título principal
-    titulo = doc.add_heading('ANÁLISIS JURÍDICO', 0)
-    titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Nombre del documento analizado
-    subtitulo = doc.add_paragraph(f'Documento: {nombre_documento}')
-    subtitulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Línea separadora
-    doc.add_paragraph('─' * 60)
-    
-    # Procesar el contenido línea por línea
-    lineas = texto_analisis.split('\n')
-    for linea in lineas:
-        linea = linea.strip()
-        if not linea:
-            doc.add_paragraph('')
-            continue
-            
-        # Detectar títulos de secciones
-        if linea.startswith('###') or linea.startswith('##'):
-            titulo_seccion = linea.replace('###', '').replace('##', '').strip()
-            doc.add_heading(titulo_seccion, level=2)
-        elif linea.startswith('#'):
-            titulo_seccion = linea.replace('#', '').strip()
-            doc.add_heading(titulo_seccion, level=1)
-        elif linea.startswith('**') and linea.endswith('**'):
-            # Texto en negrita
-            p = doc.add_paragraph()
-            run = p.add_run(linea.replace('**', ''))
-            run.bold = True
-        elif linea.startswith('- ') or linea.startswith('* '):
-            # Lista con viñetas
-            doc.add_paragraph(linea[2:], style='List Bullet')
-        elif linea.startswith('✓') or linea.startswith('⚠') or linea.startswith('✗'):
-            # Citas jurídicas
-            p = doc.add_paragraph(linea, style='List Bullet')
-        else:
-            doc.add_paragraph(linea)
-    
-    # Guardar en memoria
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-# Generar y ofrecer descarga en Word
-word_buffer = generar_word(resultado, archivo.name)
-st.download_button(
-    label="⬇️ Descargar análisis en Word",
-    data=word_buffer,
-    file_name=f"analisis_{archivo.name.replace('.pdf', '')}.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+        word_buffer = generar_word(resultado, archivo.name)
+        st.download_button(
+            label="⬇️ Descargar análisis en Word",
+            data=word_buffer,
+            file_name=f"analisis_{archivo.name.replace('.pdf', '')}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
