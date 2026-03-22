@@ -2,6 +2,9 @@ import streamlit as st
 import anthropic
 import base64
 import io
+import json
+import requests
+from datetime import datetime
 from PIL import Image
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -13,7 +16,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# ─── CSS PERSONALIZADO ───
+# ─── CSS ───
 st.markdown("""
 <style>
     .app-header {
@@ -101,6 +104,12 @@ cualquier uso oficial.
 
 Área de especialización activa: Derecho de Familia
 Nombre del estudio: Estudio Cairoli
+
+IDENTIFICACIÓN DEL ESTUDIO
+Cuando el documento mencione múltiples profesionales,
+identificá claramente cuál representa al Estudio Cairoli
+y cuál representa a la parte contraria. Nunca mezcles
+los nombres de ambos bajo el mismo encabezado del análisis.
 
 USUARIOS Y CONTEXTO
 Los usuarios autorizados son profesionales del estudio.
@@ -288,7 +297,78 @@ CITAS A VERIFICAR: [citas marcadas con ✗]
 ─────────────────────────────
 """
 
-# ─── FUNCIONES ───
+# ─── GITHUB MEMORY ───
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+GITHUB_REPO = st.secrets.get("GITHUB_REPO", "")
+MEMORY_FILE = "memoria_estudio.json"
+
+def cargar_memoria():
+    """Carga el historial de sesiones anteriores desde GitHub."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return []
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{MEMORY_FILE}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            contenido = response.json()
+            data = base64.b64decode(contenido['content']).decode('utf-8')
+            return json.loads(data)
+        return []
+    except:
+        return []
+
+def guardar_memoria(historial):
+    """Guarda el historial de sesiones en GitHub."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{MEMORY_FILE}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        
+        contenido_nuevo = json.dumps(historial, ensure_ascii=False, indent=2)
+        contenido_b64 = base64.b64encode(contenido_nuevo.encode('utf-8')).decode('utf-8')
+        
+        get_response = requests.get(url, headers=headers)
+        sha = get_response.json().get('sha', '') if get_response.status_code == 200 else ''
+        
+        payload = {
+            "message": f"Memoria actualizada {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "content": contenido_b64
+        }
+        if sha:
+            payload["sha"] = sha
+        
+        requests.put(url, headers=headers, json=payload)
+    except:
+        pass
+
+def generar_resumen_caso(nombre_archivo, analisis):
+    """Genera un resumen compacto del caso para guardar en memoria."""
+    lineas = analisis.split('\n')
+    resumen_lineas = []
+    for linea in lineas[:30]:
+        if linea.strip():
+            resumen_lineas.append(linea.strip())
+    return ' '.join(resumen_lineas[:10])
+
+def construir_contexto_memoria(historial):
+    """Construye el texto de contexto histórico para Claude."""
+    if not historial:
+        return ""
+    
+    contexto = "\n\nHISTORIAL DE CASOS ANTERIORES DEL ESTUDIO:\n"
+    contexto += "Los siguientes casos fueron analizados previamente. Usá esta información como contexto:\n\n"
+    
+    for caso in historial[-5:]:
+        contexto += f"Fecha: {caso.get('fecha', 'N/A')}\n"
+        contexto += f"Documento: {caso.get('documento', 'N/A')}\n"
+        contexto += f"Resumen: {caso.get('resumen', 'N/A')}\n"
+        contexto += "---\n"
+    
+    return contexto
+
+# ─── FUNCIONES PRINCIPALES ───
 def procesar_pdf(archivo_bytes):
     """Convierte cualquier PDF a imágenes para Claude Vision."""
     from pdf2image import convert_from_bytes
@@ -302,9 +382,11 @@ def procesar_pdf(archivo_bytes):
         imagenes.append(imagen_b64)
     return imagenes
 
-def obtener_analisis(imagenes, prompt_texto):
-    """Manda las imágenes a Claude Vision y obtiene el análisis."""
+def obtener_analisis(imagenes, prompt_texto, contexto_memoria=""):
+    """Manda las imágenes a Claude Vision con contexto de memoria."""
     client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    
+    system_con_memoria = SYSTEM_PROMPT + contexto_memoria
     
     mensaje_contenido = []
     for img in imagenes:
@@ -323,8 +405,8 @@ def obtener_analisis(imagenes, prompt_texto):
     
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
+        max_tokens=8000,
+        system=system_con_memoria,
         messages=[{"role": "user", "content": mensaje_contenido}]
     )
     return message.content[0].text
@@ -361,6 +443,13 @@ def generar_word(texto_analisis, nombre_documento):
     buffer.seek(0)
     return buffer
 
+# ─── INICIALIZAR MEMORIA ───
+if 'historial' not in st.session_state:
+    st.session_state['historial'] = cargar_memoria()
+
+if 'mensajes_sesion' not in st.session_state:
+    st.session_state['mensajes_sesion'] = []
+
 # ─── HEADER ───
 nombre_estudio = st.secrets.get("NOMBRE_ESTUDIO", "Estudio Jurídico")
 nombre_usuario = st.secrets.get("NOMBRE_USUARIO", "Dr./Dra.")
@@ -380,6 +469,14 @@ st.markdown(f"""
 
 st.markdown("<div style='height: 16px'></div>", unsafe_allow_html=True)
 
+# ─── MOSTRAR MEMORIA ───
+if st.session_state['historial']:
+    with st.expander(f"📂 Casos anteriores ({len(st.session_state['historial'])} registros)"):
+        for caso in reversed(st.session_state['historial'][-5:]):
+            st.markdown(f"**{caso.get('fecha', '')}** — {caso.get('documento', '')}")
+            st.markdown(f"_{caso.get('resumen', '')}_")
+            st.markdown("---")
+
 # ─── UPLOAD ───
 st.markdown("**Documento a analizar**")
 archivo = st.file_uploader(
@@ -393,17 +490,31 @@ if archivo:
     st.success(f"✓ {archivo.name}")
     
     if st.button("Analizar documento"):
-        with st.spinner("Procesando documento con Vision... esto puede tomar unos segundos"):
+        with st.spinner("Procesando documento con Vision..."):
             archivo_bytes = archivo.read()
             imagenes = procesar_pdf(archivo_bytes)
             st.info(f"📄 {len(imagenes)} página/s procesada/s")
+            
+            contexto_memoria = construir_contexto_memoria(st.session_state['historial'])
+            
             resultado = obtener_analisis(
                 imagenes,
-                "Analizá este documento jurídico y aplicá el flujo completo de trabajo obligatorio."
+                "Analizá este documento jurídico y aplicá el flujo completo de trabajo obligatorio.",
+                contexto_memoria
             )
+            
             st.session_state['resultado'] = resultado
             st.session_state['imagenes'] = imagenes
             st.session_state['nombre_archivo'] = archivo.name
+            
+            resumen = generar_resumen_caso(archivo.name, resultado)
+            nuevo_caso = {
+                "fecha": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "documento": archivo.name,
+                "resumen": resumen
+            }
+            st.session_state['historial'].append(nuevo_caso)
+            guardar_memoria(st.session_state['historial'])
 
 # ─── RESULTADO ───
 if 'resultado' in st.session_state:
@@ -430,18 +541,19 @@ if 'resultado' in st.session_state:
         escrito_tipo = st.text_input(
             "¿Qué escrito necesitás redactar?",
             placeholder="Ej: convenio regulador, contestación de demanda, oficio...",
-            label_visibility="visible"
         )
         
         if st.button("✍️ Redactar escrito") and escrito_tipo:
             with st.spinner(f"Redactando {escrito_tipo}..."):
+                contexto_memoria = construir_contexto_memoria(st.session_state['historial'])
                 prompt_redaccion = f"""Basándote en el documento analizado, redactá un/a {escrito_tipo} completo en formato procesal argentino.
 El escrito debe estar listo para editar y presentar.
 Marcá con [COMPLETAR: descripción] los campos donde el abogado debe agregar datos específicos."""
                 
                 escrito = obtener_analisis(
                     st.session_state['imagenes'],
-                    prompt_redaccion
+                    prompt_redaccion,
+                    contexto_memoria
                 )
                 st.session_state['escrito'] = escrito
                 st.session_state['escrito_tipo'] = escrito_tipo
@@ -456,7 +568,7 @@ if 'escrito' in st.session_state:
         f"{st.session_state['escrito_tipo']}_{st.session_state['nombre_archivo']}"
     )
     st.download_button(
-        label=f"⬇️ Descargar {st.session_state['escrito_tipo']} en Word",
+        label=f"⬇️ Descargar en Word",
         data=word_escrito,
         file_name=f"{st.session_state['escrito_tipo']}_{st.session_state['nombre_archivo'].replace('.pdf','')}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
