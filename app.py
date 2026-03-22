@@ -1,6 +1,5 @@
 import streamlit as st
 import anthropic
-import PyPDF2
 import base64
 import io
 from PIL import Image
@@ -17,7 +16,6 @@ st.set_page_config(
 # ─── CSS PERSONALIZADO ───
 st.markdown("""
 <style>
-    /* Header de la app */
     .app-header {
         background: #1a2744;
         padding: 16px 24px;
@@ -62,26 +60,6 @@ st.markdown("""
         font-size: 10px;
         letter-spacing: 0.5px;
     }
-    /* Pasos del análisis */
-    .paso-badge {
-        background: #1a2744;
-        border-radius: 3px;
-        padding: 2px 8px;
-        color: white;
-        font-size: 10px;
-        font-weight: 600;
-        display: inline-block;
-        margin-bottom: 4px;
-        letter-spacing: 0.5px;
-    }
-    .paso-card {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 12px 16px;
-        border-left: 3px solid #1a2744;
-        margin-bottom: 10px;
-    }
-    /* Botones de acción */
     .stDownloadButton > button {
         background: #1a2744 !important;
         color: white !important;
@@ -100,7 +78,6 @@ st.markdown("""
         font-weight: 500 !important;
         width: 100% !important;
     }
-    /* Ocultar elementos de Streamlit */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -170,9 +147,7 @@ Paso 1 — Comprensión
 Antes de cualquier análisis:
 - Identificá el tipo de proceso o escrito solicitado
 - Determiná si el estudio representa a actor o demandado
-- Identificá todas las partes con su rol procesal exacto:
-  parte actora, demandada, demandados subsidiarios, 
-  terceros, representantes letrados
+- Identificá todas las partes con su rol procesal exacto
 - Revisá los documentos disponibles
 - Si falta información crítica, solicitala antes de continuar
 
@@ -267,6 +242,21 @@ Paso 5 — Revisión jurídica
 - Posibles debilidades del planteo
 - Sugerencias de mejora si las hay
 
+ESCRITOS SUGERIDOS
+Al finalizar el análisis, identificá el tipo de 
+documento analizado y listá los escritos que 
+corresponde redactar para este caso específico.
+Nunca sugerás escritos que no correspondan al 
+tipo de proceso o documento analizado.
+
+Formato obligatorio de esta sección:
+ESCRITOS QUE PODRÍA NECESITAR:
+- [nombre del escrito]: [una línea explicando para qué sirve]
+
+Si el documento no requiere ningún escrito de 
+respuesta — indicarlo explícitamente y sugerí 
+qué documentación complementaria podría ser útil.
+
 RESUMEN DE EXPEDIENTE
 Cuando el profesional proporcione un expediente 
 completo para resumir, el resumen incluye:
@@ -299,47 +289,37 @@ CITAS A VERIFICAR: [citas marcadas con ✗]
 """
 
 # ─── FUNCIONES ───
-def analizar_pdf_digital(archivo_bytes):
-    lector = PyPDF2.PdfReader(io.BytesIO(archivo_bytes))
-    texto = ""
-    for pagina in lector.pages:
-        texto += pagina.extract_text() or ""
-    return texto
-
-def analizar_pdf_escaneado(archivo_bytes):
+def procesar_pdf(archivo_bytes):
+    """Convierte cualquier PDF a imágenes para Claude Vision."""
     from pdf2image import convert_from_bytes
-    paginas = convert_from_bytes(archivo_bytes, dpi=100)
+    paginas = convert_from_bytes(archivo_bytes, dpi=150)
     imagenes = []
     for pagina in paginas:
         pagina.thumbnail((1500, 1500), Image.LANCZOS)
         buffer = io.BytesIO()
-        pagina.save(buffer, format='JPEG', quality=75)
+        pagina.save(buffer, format='JPEG', quality=85)
         imagen_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         imagenes.append(imagen_b64)
     return imagenes
 
-def obtener_analisis(contenido, es_imagen=False, prompt_extra=""):
+def obtener_analisis(imagenes, prompt_texto):
+    """Manda las imágenes a Claude Vision y obtiene el análisis."""
     client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-    if es_imagen:
-        mensaje_contenido = []
-        for img in contenido:
-            mensaje_contenido.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": img
-                }
-            })
-        texto_final = "Analizá este documento jurídico y aplicá el flujo completo de 5 pasos."
-        if prompt_extra:
-            texto_final = prompt_extra
-        mensaje_contenido.append({"type": "text", "text": texto_final})
-    else:
-        if prompt_extra:
-            mensaje_contenido = f"{prompt_extra}\n\n{contenido}"
-        else:
-            mensaje_contenido = f"Analizá este documento jurídico y aplicá el flujo completo de 5 pasos:\n\n{contenido}"
+    
+    mensaje_contenido = []
+    for img in imagenes:
+        mensaje_contenido.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": img
+            }
+        })
+    mensaje_contenido.append({
+        "type": "text",
+        "text": prompt_texto
+    })
     
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
@@ -413,27 +393,16 @@ if archivo:
     st.success(f"✓ {archivo.name}")
     
     if st.button("Analizar documento"):
-        with st.spinner("Analizando... esto puede tomar unos segundos"):
+        with st.spinner("Procesando documento con Vision... esto puede tomar unos segundos"):
             archivo_bytes = archivo.read()
-            try:
-                texto = analizar_pdf_digital(archivo_bytes)
-                if len(texto.strip()) > 100:
-                    st.info("📄 PDF digital detectado")
-                    resultado = obtener_analisis(texto)
-                    contenido_guardado = texto
-                    es_imagen_guardada = False
-                else:
-                    raise ValueError("Texto insuficiente")
-            except:
-                st.info("🖼️ PDF escaneado — procesando con Vision")
-                imagenes = analizar_pdf_escaneado(archivo_bytes)
-                resultado = obtener_analisis(imagenes, es_imagen=True)
-                contenido_guardado = imagenes
-                es_imagen_guardada = True
-            
+            imagenes = procesar_pdf(archivo_bytes)
+            st.info(f"📄 {len(imagenes)} página/s procesada/s")
+            resultado = obtener_analisis(
+                imagenes,
+                "Analizá este documento jurídico y aplicá el flujo completo de trabajo obligatorio."
+            )
             st.session_state['resultado'] = resultado
-            st.session_state['contenido'] = contenido_guardado
-            st.session_state['es_imagen'] = es_imagen_guardada
+            st.session_state['imagenes'] = imagenes
             st.session_state['nombre_archivo'] = archivo.name
 
 # ─── RESULTADO ───
@@ -458,32 +427,38 @@ if 'resultado' in st.session_state:
         )
     
     with col2:
-        if st.button("✍️ Redactar contestación"):
-            with st.spinner("Redactando contestación..."):
-                prompt_redaccion = """Basándote en el análisis anterior, redactá una contestación de demanda completa en formato procesal argentino. 
-                El escrito debe estar listo para editar y presentar. 
-                Marcá con [COMPLETAR: descripción] los campos donde el abogado debe agregar datos específicos."""
-                
-                contestacion = obtener_analisis(
-                    st.session_state['contenido'],
-                    es_imagen=st.session_state['es_imagen'],
-                    prompt_extra=prompt_redaccion
-                )
-                st.session_state['contestacion'] = contestacion
-    
-    if 'contestacion' in st.session_state:
-        st.markdown("---")
-        st.markdown("✍️ **Contestación redactada**")
-        st.markdown(st.session_state['contestacion'])
+        escrito_tipo = st.text_input(
+            "¿Qué escrito necesitás redactar?",
+            placeholder="Ej: convenio regulador, contestación de demanda, oficio...",
+            label_visibility="visible"
+        )
         
-        word_contestacion = generar_word(
-            st.session_state['contestacion'],
-            f"contestacion_{st.session_state['nombre_archivo']}"
-        )
-        st.download_button(
-            label="⬇️ Descargar contestación en Word",
-            data=word_contestacion,
-            file_name=f"contestacion_{st.session_state['nombre_archivo'].replace('.pdf','')}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="dl_contestacion"
-        )
+        if st.button("✍️ Redactar escrito") and escrito_tipo:
+            with st.spinner(f"Redactando {escrito_tipo}..."):
+                prompt_redaccion = f"""Basándote en el documento analizado, redactá un/a {escrito_tipo} completo en formato procesal argentino.
+El escrito debe estar listo para editar y presentar.
+Marcá con [COMPLETAR: descripción] los campos donde el abogado debe agregar datos específicos."""
+                
+                escrito = obtener_analisis(
+                    st.session_state['imagenes'],
+                    prompt_redaccion
+                )
+                st.session_state['escrito'] = escrito
+                st.session_state['escrito_tipo'] = escrito_tipo
+
+if 'escrito' in st.session_state:
+    st.markdown("---")
+    st.markdown(f"✍️ **{st.session_state['escrito_tipo'].capitalize()} redactado**")
+    st.markdown(st.session_state['escrito'])
+    
+    word_escrito = generar_word(
+        st.session_state['escrito'],
+        f"{st.session_state['escrito_tipo']}_{st.session_state['nombre_archivo']}"
+    )
+    st.download_button(
+        label=f"⬇️ Descargar {st.session_state['escrito_tipo']} en Word",
+        data=word_escrito,
+        file_name=f"{st.session_state['escrito_tipo']}_{st.session_state['nombre_archivo'].replace('.pdf','')}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        key="dl_escrito"
+    )
